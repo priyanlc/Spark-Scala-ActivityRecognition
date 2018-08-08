@@ -1,53 +1,77 @@
 package analytics.activityrecognition
 
-import analytics.common.InitSparkCluster
-import org.apache.log4j.{Level, Logger}
-import org.apache.spark.sql.{DataFrame, Dataset, SparkSession}
+import analytics.init.InitSparkCluster
+import org.apache.spark.ml.Pipeline
 import org.apache.spark.ml.classification.RandomForestClassifier
-import org.apache.spark.ml.evaluation.{BinaryClassificationEvaluator, MulticlassClassificationEvaluator}
-import org.apache.spark.ml.feature.{IndexToString, StandardScaler, StringIndexer, VectorAssembler}
-import org.apache.spark.ml.param.ParamMap
+import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
+import org.apache.spark.ml.feature.{IndexToString, StringIndexer, VectorAssembler}
 import org.apache.spark.ml.tuning.{CrossValidator, CrossValidatorModel, ParamGridBuilder}
-import org.apache.spark.ml.{Pipeline, PipelineModel, PipelineStage}
 import org.apache.spark.mllib.evaluation.RegressionMetrics
-
+import org.apache.spark.sql.DataFrame
 
 
 object ActivityRecognition extends InitSparkCluster {
 
-  //Set logger level to Warn
-  Logger.getRootLogger.setLevel(Level.WARN)
-
-  case class phoneAccCoordinates(index:Int,user:String,x:Double,y:Double,z:Double,model:String,device:String,gt:String)
-  case class phoneGyroCoordinates(index:Int,user:String,x:Double,y:Double,z:Double,model:String,device:String,gt:String)
-  case class phoneAccGyroCoordinates(index:Int,user:String, x_a:Double, y_a:Double, z_a:Double, x_g:Double, y_g:Double, z_g:Double, gt:String)
-  // Creation_Time, Model, Index, x, Device, z, gt, User, y, Arrival_Time
-
+  val seed = conf.getString("hyperparameter.seed").toInt
+  val metric =  conf.getString("hyperparameter.metric")
+  val depth = conf.getString("hyperparameter.depth").toInt
+  val trees = conf.getString("hyperparameter.trees").toInt
+  val bin = conf.getString("hyperparameter.bin").toInt
+  val impurity = conf.getString("hyperparameter.classifier.impurity2")
+  val showRows = conf.getString("dataset.showRows")
 
   def main(args: Array[String]): Unit = {
 
-    import spark.implicits._
+    val usage =
+      """
+         Usage: ActivityRecognition [--sample-size double] [--to-parquet boolean] [--hyper-param boolean] [--file-path string]
+           """
+    if (args.length == 0) println(usage)
+    val arglist = args.toList
+    type OptionMap = Map[Symbol, Any]
 
-    val phoneAccCsv = "hdfs://h1:9000/user/hduser/activity/Phones_accelerometer.csv.gz"
-    val phoneGyroCsv = "hdfs://h1:9000/user/hduser/activity/Phones_gyroscope.csv.gz"
+    def nextOption(map: OptionMap, list: List[String]): OptionMap = {
+      def isSwitch(s: String) = (s(0) == '-')
 
-    val phoneAccParquet = "hdfs://h1:9000/user/hduser/activity/Phones_accelerometer.parquet"
-    val phoneGyroParquet = "hdfs://h1:9000/user/hduser/activity/Phones_gyroscope.parquet"
+      list match {
+        case Nil => map
+        case "--sample-size" :: value :: tail =>
+          nextOption(map ++ Map('samplesize -> value.toDouble), tail)
+        case "--to-parquet" :: value :: tail =>
+          nextOption(map ++ Map('toParquet -> value.toBoolean), tail)
+        case "--file-path" :: value :: tail =>
+          nextOption(map ++ Map('filepath -> value), tail)
+        case "--hyper-param" :: value :: tail =>
+          nextOption(map ++ Map('hyper -> value.toBoolean), tail)
+        case option :: tail => map
+      }
+    }
 
-    //  convertToParquet(Array(phoneAccCsv, phoneGyroCsv), Array(phoneAccParquet, phoneGyroParquet))
+    val options = nextOption(Map(), arglist)
+    println(options)
 
-    etlWithParquetToDataset(Array(phoneAccParquet, phoneGyroParquet))
+    sqlContext.setConf("spark.sql.shuffle.partitions", conf.getString("spark.sql.shuffle.partitions"))
 
-    //  val ds = etlWithParquet(Array(phoneAccParquet, phoneGyroParquet))
+    val phoneAccCsv = conf.getString("phone.acc.csv")
+    val phoneGyroCsv = conf.getString("phone.gyro.csv")
 
-    // val sampleDs=ds.sample(false,0.02)
+    val phoneAccParquet = conf.getString("phone.acc.parquet")
+    val phoneGyroParquet = conf.getString("phone.gyro.parquet")
 
-    //  trainRandomForestModel(sampleDs)
+    val sampleSize = if (options.isDefinedAt('samplesize)) options.get('samplesize).get.asInstanceOf[Double] else conf.getString("dataset.fraction").toDouble
+    val isConvertToParquet = if (options.isDefinedAt('toParquet)) options.get('toParquet).get.asInstanceOf[Boolean] else true
+    val isTrainWithHyper = if (options.isDefinedAt('hyper)) options.get('hyper).get.asInstanceOf[Boolean] else false
+
+    if(isConvertToParquet) convertToParquet(Array(phoneAccCsv, phoneGyroCsv), Array(phoneAccParquet, phoneGyroParquet))
+
+    val ds = etlWithParquet(Array(phoneAccParquet, phoneGyroParquet))
+    val sampleDs = ds.sample(false, sampleSize)
+
+    if(isTrainWithHyper) trainRandomForestModelWithHyperparameters(sampleDs) else trainRandomForestModel(sampleDs)
 
     close
 
   }
-
 
   def convertToParquet(sourcePaths: Array[String], destinationPaths: Array[String]): Unit = {
 
@@ -62,117 +86,8 @@ object ActivityRecognition extends InitSparkCluster {
   }
 
 
-  def etlWithParquetToDataset(sourcePaths: Array[String]): Unit = {
-    sqlContext.setConf("spark.sql.shuffle.partitions", "32")
-
-    val phoneAcc = spark.read.option("header", "true").option("inferSchema", "true").parquet(sourcePaths(0))
-    val phoneGyro = spark.read.option("header", "true").option("inferSchema", "true").parquet(sourcePaths(1))
-
-    import spark.implicits._
-
-    val phoneAccDS= phoneAcc.drop('Creation_Time).drop('Arrival_Time).as[phoneAccCoordinates]
-    val phoneGyroDS= phoneGyro.drop('Creation_Time).drop('Arrival_Time).as[phoneGyroCoordinates]
-
-    phoneAccDS.printSchema()
-    phoneGyroDS.printSchema()
-
-    /*
-    val phoneAccGyro = phoneAccDS.joinWith(phoneGyroDS,
-      (phoneAccDS.col("Index") === phoneGyroDS.col("Index"))
-        && (phoneAccDS.col("User") === phoneGyroDS.col("User"))
-        && (phoneAccDS.col("Model") === phoneGyroDS.col("Model"))
-        && (phoneAccDS.col("Device") === phoneGyroDS.col("Device")),"inner" )
-    */
-    /*
-    xs.as("xs").joinWith(
-  ys.as("ys"), ($"xs._1" === $"ys._1") && ($"xs._2" === $"ys._2"), "left")
-     */
-
-
-    val phoneAccGyro = phoneAccDS.as("ACC").joinWith(phoneGyroDS.as("GYRO"),
-      ($"ACC.Index"=== $"GYRO.Index")&& ($"ACC.User"=== $"GYRO.User") && ($"ACC.Model"=== $"GYRO.Model") && ($"ACC.Device"=== $"GYRO.Device"), "inner")
-
-    println(phoneAccGyro.count())
-    phoneAccGyro.show(100)
-
-    //10,835,775
-
-    //
-    //  phoneAccDS.printSchema()
-
-    //  val phoneGyroDS= phoneGyro.as[phoneGyroCoordinates]
-    //  phoneGyroDS.printSchema()
-
-
-    /*
-    root
- |-- Index: integer (nullable = true)
- |-- Arrival_Time: long (nullable = true)
- |-- Creation_Time: long (nullable = true)
- |-- x: double (nullable = true)
- |-- y: double (nullable = true)
- |-- z: double (nullable = true)
- |-- User: string (nullable = true)
- |-- Model: string (nullable = true)
- |-- Device: string (nullable = true)
- |-- gt: string (nullable = true)
-
-root
- |-- Index: integer (nullable = true)
- |-- Arrival_Time: long (nullable = true)
- |-- Creation_Time: long (nullable = true)
- |-- x: double (nullable = true)
- |-- y: double (nullable = true)
- |-- z: double (nullable = true)
- |-- User: string (nullable = true)
- |-- Model: string (nullable = true)
- |-- Device: string (nullable = true)
- |-- gt: string (nullable = true)
-
-
- +-----+----+------+--------+-------------------+------------------+-----------------+-----+--------------------+--------------------+--------------------+-----+--------+--------+
-|Index|User| Model|  Device|                x_a|               y_a|              z_a| gt_a|                 x_g|                 y_g|                 z_g| gt_g|gt_combi|gt_grand|
-+-----+----+------+--------+-------------------+------------------+-----------------+-----+--------------------+--------------------+--------------------+-----+--------+--------+
-|    0|   h|    s3|    s3_1|           1.436521|         0.8714894|         9.519346|  sit|        -0.010995574|         0.011301007|        0.0021380284|  sit|    true|     sit|
-|    1|   e|    s3|    s3_1|         -2.3750482|       -0.08619126|           9.5385|stand|         0.022907447|         -0.01740966|           -0.086132|stand|    true|   stand|
-|    2|   c|    s3|    s3_1|          -2.873042|       -0.92895025|         9.356541|stand|         0.006414085|         0.002443461|         0.004581489|stand|    true|   stand|
-|    2|   d|nexus4|nexus4_1|-2.1079407000000003|         -1.188858|         9.999176|stand|         0.016433716|        0.0028381348|        -0.014266968|stand|    true|   stand|
-|    2|   i|    s3|    s3_1|        -0.40222588|       -0.21068975|         9.797073|stand|9.162978999999999E-4|         0.007330383|-0.00885754599999...|stand|    true|   stand|
-|    3|   b|s3mini|s3mini_1|-3.3470940000000002|1.8423381999999997|9.327810000000001|stand|-0.01415079100000...|0.029765457000000002|  0.6643551999999999|stand|    true|   stand|
-|    4|   g|nexus4|nexus4_1|         -2.1472168|1.7068633999999998|9.859924000000001|stand|3.356933600000000...|          0.02720642|         0.010025024|stand|    true|   stand|
-|    5|   a|s3mini|s3mini_1| 5.8215012999999995|        -1.1935096|        7.4567413|stand|-0.00536754170000...|         0.005123562|        0.0024397916|stand|    true|   stand|
-|    5|   c|    s3|    s3_1|         -2.8443117|        -0.8331822|         9.337387|stand|         0.011301007|0.001832595799999...|         0.003970624|stand|    true|   stand|
-|    5|   c|    s3|    s3_2|         -3.0358477|        -0.7374141|         8.963891|stand|         -0.01863139|         0.012217305|          0.05375614|stand|    true|   stand|
-+-----+----+------+--------+-------------------+------------------+-----------------+-----+--------------------+--------------------+--------------------+-----+--------+--------+
-only showing top 10 rows
-
-root
- |-- Index: integer (nullable = true)
- |-- User: string (nullable = true)
- |-- Model: string (nullable = true)
- |-- Device: string (nullable = true)
- |-- x_a: double (nullable = true)
- |-- y_a: double (nullable = true)
- |-- z_a: double (nullable = true)
- |-- gt_a: string (nullable = true)
- |-- x_g: double (nullable = true)
- |-- y_g: double (nullable = true)
- |-- z_g: double (nullable = true)
- |-- gt_g: string (nullable = true)
- |-- gt_combi: boolean (nullable = true)
- |-- gt_grand: string (nullable = true)
-
-     */
-
-
-
-
-
-  }
-
   def etlWithParquet(sourcePaths: Array[String]): DataFrame = {
 
-    spark.sqlContext.setConf("spark.sql.shuffle.partitions", "32")
 
     val phoneAcc = spark.read.option("header", "true").option("inferSchema", "true").parquet(sourcePaths(0))
     val phoneGyro = spark.read.option("header", "true").option("inferSchema", "true").parquet(sourcePaths(1))
@@ -219,87 +134,40 @@ root
       .where("gt_combi = true")
 
     phoneAccGyroCleaned.createOrReplaceTempView("vw_phone_acc_gyro_cleaned")
-    println("Number of records for the ML stage :"+phoneAccGyroCleaned.count())
-    phoneAccGyroCleaned.show(10)
 
-    phoneAccGyroCleaned.printSchema()
+    println("Number of records for the ML stage :"+phoneAccGyroCleaned.count())
+
+    phoneAccGyroCleaned.show(showRows.toInt)
+
     phoneAccGyroCleaned
 
   }
 
+
   def trainRandomForestModel(data: DataFrame): Unit = {
 
-    val seed = 5043
-    val metric = "accuracy"
-    val depth = 30
-    val trees = 50
-    val bin = 100
+    println("Training Random Forest model")
 
-    println("Number of records  before removing NA:"+data.count())
-    println("Number of records after removing NA :"+data.na.drop.count())
-
-    val Array(trainingData, testData) = data.na.drop.randomSplit(Array(0.7, 0.3), seed)
-
-    trainingData.cache()
-    testData.cache()
+    logger.info("Splitting training and test data ")
+    val (trainingData,testData)=  splitAndCacheData(data)
 
     println("Number of records used for the ML trainingData stage :"+trainingData.count())
 
-    val featureCols = data.select("x_a", "y_a", "z_a", "x_g", "y_g", "z_g").columns
+    logger.info("Creating pipeline ")
+    val pipeline=createTrainingPipeline(data)
 
-    val labelIndexer = new StringIndexer().setInputCol("gt_grand").setOutputCol("indexed_gt_grand").fit(data)
-
-    // Scale
-
-    println("labelIndexer :")
-
-    val assembler = new VectorAssembler().setInputCols(featureCols).setOutputCol("indexed_features")
-
-    // val assembler = new VectorAssembler().setInputCols(sScaler).setOutputCol("indexed_features")
-
-    println("assembler :")
-
-    val classifier = new RandomForestClassifier()
-      .setImpurity("gini")
-      .setMaxDepth(depth)
-      .setNumTrees(trees)
-      .setFeatureSubsetStrategy("auto")
-      .setSeed(seed)
-      .setLabelCol("indexed_gt_grand")
-      .setFeaturesCol("indexed_features").setMaxBins(bin)
-
-    println("classifier :")
-
-    // Convert indexed labels back to original labels.
-    val labelConverter = new IndexToString()
-      .setInputCol("prediction")
-      .setOutputCol("predicted_label")
-      .setLabels(labelIndexer.labels)
-
-    println("labelConverter :")
-
-    val pipeline = new Pipeline().setStages(Array(labelIndexer, assembler, classifier, labelConverter))
-
-    println("pipeline :")
-
+    logger.info("Creating model from pipeline - this is the training state :")
     val model = pipeline.fit(trainingData)
 
-    println("model :")
-
+    logger.info("Making predictions :")
     val predictions = model.transform(testData)
 
-    println("predictions :")
+    logger.info("Printing a sample of the predictions :")
+    predictions.select("predicted_label", "gt_grand", "indexed_features").show(showRows.toInt)
 
-    predictions.select("predicted_label", "gt_grand", "indexed_features").show(10)
+    val evaluator = createEvaluator
 
-    val evaluator = new MulticlassClassificationEvaluator()
-      .setLabelCol("indexed_gt_grand")
-      .setPredictionCol("prediction")
-      .setMetricName(metric)
-
-    println("Evaluator Islargerbetter "+evaluator.isLargerBetter)
-
-
+    logger.info("Checking the accuracy")
     val accuracy = evaluator.evaluate(predictions)
 
     println("Test Error before hyper-parameter tuning = " + (1.0 - accuracy))
@@ -314,53 +182,141 @@ root
     println("RMSE Squared: " + rm.rootMeanSquaredError)
     println("R Squared: " + rm.r2)
     println("Explained Variance: " + rm.explainedVariance + "\n")
+  }
 
+
+  private def trainRandomForestModelWithHyperparameters(data: DataFrame) ={
+
+    println("Training Random Forest model with hyper parameters and cross validation")
+
+    val maxBinsRangeArray = Array(conf.getInt("hyperparameter.minBin"), conf.getInt("hyperparameter.maxBin"))
+    val maxDepthRangeArray = Array(conf.getInt("hyperparameter.minDepth"), conf.getInt("hyperparameter.maxDepth"))
+    val maxTreesRangeArray = Array(conf.getInt("hyperparameter.minNumOfTrees"), conf.getInt("hyperparameter.maxNumOfTrees"))
+    val impurityArray = Array(conf.getString("hyperparameter.classifier.impurity1"), conf.getString("hyperparameter.classifier.impurity2"))
+
+    logger.info("Splitting training and test data ")
+    val (trainingData,testData)=  splitAndCacheData(data)
+
+    println("Number of records used for the ML trainingData stage :"+trainingData.count())
+
+    logger.info("Creating pipeline ")
+    val classifier =createClassifier
+    val pipeline = createTrainingPipeline(trainingData)
 
     val paramGrid = new ParamGridBuilder()
-      .addGrid(classifier.maxBins, Array(40,150))
-      .addGrid(classifier.maxDepth, Array(3,30))
-      .addGrid(classifier.numTrees, Array(40,120))
-      .addGrid(classifier.impurity, Array("entropy", "gini"))
+      .addGrid(classifier.maxBins, maxBinsRangeArray)
+      .addGrid(classifier.maxDepth, maxDepthRangeArray)
+      .addGrid(classifier.numTrees, maxTreesRangeArray)
+      .addGrid(classifier.impurity, impurityArray)
       .build()
+
+    val evaluator =createEvaluator
 
     val cv = new CrossValidator()
       .setEstimator(pipeline)
       .setEvaluator(evaluator)
       .setEstimatorParamMaps(paramGrid)
-      .setNumFolds(10)
+      .setNumFolds(conf.getInt("hyperparameter.validation.numberOfFolds"))
 
+    logger.info("Training with cross validation ")
     val pipelineFittedModel = cv.fit(trainingData)
 
-    val predictions2 = pipelineFittedModel.transform(testData)
-    val accuracy2 = evaluator.evaluate(predictions2)
+    logger.info("Making predictions")
+    val predictions= pipelineFittedModel.transform(testData)
 
-    println("Test Error after hyper-parameter tuning = " + (1.0 - accuracy2))
+    logger.info("Checking the accuracy")
+    val accuracy = evaluator.evaluate(predictions)
 
+    println("Test Error after hyper-parameter tuning = " + (1.0 - accuracy))
     println("Best model " + pipelineFittedModel.bestModel.asInstanceOf[org.apache.spark.ml.PipelineModel].params.toString)
 
+    println("Best model PipelineModel: ")
+    pipelineFittedModel.bestModel.asInstanceOf[org.apache.spark.ml.PipelineModel].params.foreach(println)
 
+    println("Best model CrossValidatorModel: ")
+    pipelineFittedModel.bestModel.asInstanceOf[CrossValidatorModel].params.foreach(println)
+
+    println("Best model CrossValidatorModel: extractParamMap")
     val paramMap=pipelineFittedModel
-      .bestModel.asInstanceOf[org.apache.spark.ml.PipelineModel]
-      .stages(0)
-      .extractParamMap
+      .bestModel.asInstanceOf[CrossValidatorModel].extractParamMap().toSeq.foreach(println)
 
-    val bestModel=pipelineFittedModel
-      .bestModel.asInstanceOf[org.apache.spark.ml.PipelineModel]
-
-    val rm2 = new RegressionMetrics(
-      predictions2.select("prediction", "indexed_gt_grand").rdd.map(x =>
+    val rm = new RegressionMetrics(
+      predictions.select("prediction", "indexed_gt_grand").rdd.map(x =>
         (x(0).asInstanceOf[Double], x(1).asInstanceOf[Double]))
     )
 
-    println("MSE: " + rm2.meanSquaredError)
-    println("MAE: " + rm2.meanAbsoluteError)
-    println("RMSE Squared: " + rm2.rootMeanSquaredError)
-    println("R Squared: " + rm2.r2)
-    println("Explained Variance: " + rm2.explainedVariance + "\n")
+    println("MSE: " + rm.meanSquaredError)
+    println("MAE: " + rm.meanAbsoluteError)
+    println("RMSE Squared: " + rm.rootMeanSquaredError)
+    println("R Squared: " + rm.r2)
+    println("Explained Variance: " + rm.explainedVariance + "\n")
 
 
   }
 
+  private  def createClassifier()={
+
+    val classifier= new RandomForestClassifier()
+      .setImpurity(impurity)
+      .setMaxDepth(depth)
+      .setNumTrees(trees)
+      .setFeatureSubsetStrategy("auto")
+      .setSeed(seed)
+      .setLabelCol("indexed_gt_grand")
+      .setFeaturesCol("indexed_features").setMaxBins(bin)
+    classifier
+  }
+
+
+  private def createEvaluator()={
+    val evaluator = new MulticlassClassificationEvaluator()
+      .setLabelCol("indexed_gt_grand")
+      .setPredictionCol("prediction")
+      .setMetricName(metric)
+    evaluator
+
+  }
+
+  private def splitAndCacheData(data:DataFrame):(DataFrame,DataFrame) ={
+
+    val trainingTestSplitArray= Array(conf.getString("dataset.split.training").toDouble, conf.getString("dataset.split.test").toDouble)
+    val Array(trainingData, testData) = data.na.drop.randomSplit(trainingTestSplitArray, seed)
+
+    trainingData.cache()
+    testData.cache()
+
+    (trainingData,testData)
+  }
+
+  private def createTrainingPipeline(data: DataFrame):Pipeline ={
+
+    val featureCols = data.select("x_a", "y_a", "z_a", "x_g", "y_g", "z_g").columns
+
+    logger.info("Creating labelIndexer :")
+
+    val labelIndexer = new StringIndexer().setInputCol("gt_grand").setOutputCol("indexed_gt_grand").fit(data)
+
+    logger.info("Creating Vector Assembler:")
+
+    val assembler = new VectorAssembler().setInputCols(featureCols).setOutputCol("indexed_features")
+
+    logger.info("Creating classifier :")
+
+    val classifier = createClassifier()
+
+    logger.info("Creating labelConverter :")
+
+    // Convert indexed labels back to original labels.
+    val labelConverter = new IndexToString()
+      .setInputCol("prediction")
+      .setOutputCol("predicted_label")
+      .setLabels(labelIndexer.labels)
+
+    logger.info("Assembling the pipeline :")
+
+    val pipeline = new Pipeline().setStages(Array(labelIndexer, assembler, classifier, labelConverter))
+    pipeline
+  }
 
 
 

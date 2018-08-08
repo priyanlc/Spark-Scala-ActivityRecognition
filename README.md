@@ -1,5 +1,5 @@
-# _Spark-Gradle-Template_
-A barebones project with scala, apache spark built using gradle. Spark-shell provides `spark` and `sc` variables pre-initialised, here I did the same using a *scala trait* that you can extend.
+# _Spark-Activity-recognition POC
+A project with scala, apache spark built using gradle.
 
 ## Prerequisites
 - [Java](https://java.com/en/download/)
@@ -9,7 +9,7 @@ A barebones project with scala, apache spark built using gradle. Spark-shell pro
 ## Build and Demo process
 
 ### Clone the Repo
-`git clone https://github.com/faizanahemad/spark-gradle-template.git`
+`git clone https://github.com/priyanlc/Spark-Scala-ActivityRecognition.git`
 
 ### Build
 `./gradlew clean build`
@@ -17,73 +17,32 @@ A barebones project with scala, apache spark built using gradle. Spark-shell pro
 `./gradlew run`
 ### All Together
 `./gradlew clean run`
+### Build Uber Jar to deploy in Spark cluster
+./gradlew shadowJar
 
-
-## What the demo does?
-Take a look at *src->main->scala->template->spark* directory
-
-We have two Items here. 
-
-The trait `InitSpark` which is extended by any class that wants to run spark code. This trait has all the code for initialization. I have also supressed the logging to only error levels for less noise.
-
-The file `Main.scala` has the executable class `Main`. 
-In this class, I do 4 things
-
-- Print spark version.
-- Find sum from 1 to 100 (inclusive).
-- Read a csv file into a structured `DataSet`. 
-- Find average age of persons from the csv.
-
-**InitSpark.scala**
-```scala
-trait InitSpark {
-  val spark: SparkSession = SparkSession.builder().appName("Spark example").master("local[*]")
-                            .config("spark.some.config.option", "some-value").getOrCreate()
-  val sc = spark.sparkContext
-  val sqlContext = spark.sqlContext
-  def reader = spark.read.option("header",true).option("inferSchema", true).option("mode", "DROPMALFORMED")
-  def readerWithoutHeader = spark.read.option("header",true).option("inferSchema", true).option("mode", "DROPMALFORMED")
-  private def init = {
-    sc.setLogLevel("ERROR")
-    Logger.getLogger("org").setLevel(Level.ERROR)
-    Logger.getLogger("akka").setLevel(Level.ERROR)
-    LogManager.getRootLogger.setLevel(Level.ERROR)
-  }
-  init
-  def close = {
-    spark.close()
-  }
-}
+## to run as a local spark process do the following changes in InitSparkCluster
+``` val spark = SparkSession.builder()
+    .appName("ActivityRecognition")
+    .master("local[*]")
+    .getOrCreate()
 ```
 
-**Main.scala**
-```scala
-final case class Person(firstName: String, lastName: String, country: String, age: Int)
+## to Submit to Spark cluster
+spark-submit \
+    --class analytics.activityrecognition.ActivityRecognition \
+    --master spark://h1:7077 \
+    --deploy-mode client \
+    --executor-memory 28G \
+    --driver-memory 6G \
+    --total-executor-cores 32 \
+     /home/hduser/jars/spark-activity-recognition-1.0-SNAPSHOT-shadow.jar --to-parquet false --hyper-param true
 
-object Main extends InitSpark {
-  def main(args: Array[String]) = {
-    import spark.implicits._
-
-    val version = spark.version
-    println("VERSION_STRING = " + version)
-
-    val sumHundred = spark.range(1, 101).reduce(_ + _)
-    println(sumHundred)
-
-    val persons = reader.csv("people-example.csv").as[Person]
-    val averageAge = persons.agg(avg("age")).first.get(0).asInstanceOf[Double]
-    println(f"Average Age: $averageAge%.2f")
-
-    close
-  }
-}
-```
 
 ## Using this Repo
 Just import it into your favorite IDE as a gradle project. Tested with IntelliJ to work. Or use your favorite editor and build from command line with gradle.
 
 ## Libraries Included
-- Spark - 2.1.0
+- Spark - 2.2.0
 
 ## Useful Links
 - [Spark Docs - Root Page](http://spark.apache.org/docs/latest/)
@@ -92,24 +51,7 @@ Just import it into your favorite IDE as a gradle project. Tested with IntelliJ 
 - [Scala API Docs](http://www.scala-lang.org/api/2.12.1/scala/)
  
 ## Issues or Suggestions
-
 - Raise one on github
-- Send me a mail -> fahemad3+github @ gmail dot com (Remove the spaces and dot = .)
+- Send me a mail -> priyanchandrapala @ yahoo dot co dot uk (Remove the spaces and dot = .)
 
 
-
-## comments by Priyan
-
-gradle shadowJar --stacktrace
-
-
-    compile 'org.apache.spark:spark-mllib_2.11:2.2.0'
-    compile 'org.apache.spark:spark-sql_2.11:2.2.0'
-    compile 'org.apache.spark:spark-streaming-flume-assembly_2.11:2.2.0'
-    compile 'org.apache.spark:spark-graphx_2.11:2.2.0'
-    compile 'org.apache.spark:spark-launcher_2.11:2.2.0'
-    compile 'org.apache.spark:spark-catalyst_2.11:2.2.0'
-    compile 'org.apache.spark:spark-streaming_2.11:2.2.0'
-    compile 'org.apache.spark:spark-core_2.11:2.2.0'
-
-      url "https://oss.sonatype.org/content/repositories/snapshots"
