@@ -1,4 +1,4 @@
-# _Spark-Activity-recognition POC
+# _Spark-Activity-recognition
 A machine learning proof of concept with large datasets with Spark-ML.
 Primary objective of this project is to get an understanding of how Spark ML behaves with relatively large datasets
 
