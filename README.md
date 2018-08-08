@@ -1,5 +1,10 @@
 # _Spark-Activity-recognition POC
-A project with scala, apache spark built using gradle.
+A machine learning proof of concept with large datasets with Spark-ML.
+Primary objective of this project is to get an understanding of how Spark ML behaves with relatively large datasets
+
+## Datasets
+Datasets can be downlaoded from
+https://archive.ics.uci.edu/ml/datasets/Heterogeneity+Activity+Recognition
 
 ## Prerequisites
 - [Java](https://java.com/en/download/)
@@ -36,6 +41,10 @@ spark-submit \
     --driver-memory 6G \
     --total-executor-cores 32 \
      /home/hduser/jars/spark-activity-recognition-1.0-SNAPSHOT-shadow.jar --to-parquet false --hyper-param true
+
+
+## Test Results
+TBD
 
 
 ## Using this Repo
