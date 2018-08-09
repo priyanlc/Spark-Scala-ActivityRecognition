@@ -1,12 +1,14 @@
 package analytics.activityrecognition
 
 import analytics.init.InitSparkCluster
-import org.apache.spark.ml.Pipeline
-import org.apache.spark.ml.classification.RandomForestClassifier
+import org.apache.spark.ml.{Pipeline, PipelineModel}
+import org.apache.spark.ml.classification.{LogisticRegressionModel, RandomForestClassifier}
 import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.spark.ml.feature.{IndexToString, StringIndexer, VectorAssembler}
+import org.apache.spark.ml.param.ParamMap
 import org.apache.spark.ml.tuning.{CrossValidator, CrossValidatorModel, ParamGridBuilder}
 import org.apache.spark.mllib.evaluation.RegressionMetrics
+import org.apache.spark.mllib.feature.HashingTF
 import org.apache.spark.sql.DataFrame
 
 
@@ -154,7 +156,7 @@ object ActivityRecognition extends InitSparkCluster {
     println("Number of records used for the ML trainingData stage :"+trainingData.count())
 
     logger.info("Creating pipeline ")
-    val pipeline=createTrainingPipeline(data)
+    val pipeline=createTrainingPipeline(data,false)
 
     logger.info("Creating model from pipeline - this is the training state :")
     val model = pipeline.fit(trainingData)
@@ -200,8 +202,10 @@ object ActivityRecognition extends InitSparkCluster {
     println("Number of records used for the ML trainingData stage :"+trainingData.count())
 
     logger.info("Creating pipeline ")
-    val classifier =createClassifier
-    val pipeline = createTrainingPipeline(trainingData)
+
+    val pipeline = createTrainingPipeline(trainingData,true)
+    val classifier =pipeline.getStages(2).asInstanceOf[RandomForestClassifier]
+
 
     val paramGrid = new ParamGridBuilder()
       .addGrid(classifier.maxBins, maxBinsRangeArray)
@@ -228,17 +232,15 @@ object ActivityRecognition extends InitSparkCluster {
     val accuracy = evaluator.evaluate(predictions)
 
     println("Test Error after hyper-parameter tuning = " + (1.0 - accuracy))
-    println("Best model " + pipelineFittedModel.bestModel.asInstanceOf[org.apache.spark.ml.PipelineModel].params.toString)
 
-    println("Best model PipelineModel: ")
-    pipelineFittedModel.bestModel.asInstanceOf[org.apache.spark.ml.PipelineModel].params.foreach(println)
+    println("Best model: avgMetrics ")
+    pipelineFittedModel.avgMetrics.foreach(println)
 
-    println("Best model CrossValidatorModel: ")
-    pipelineFittedModel.bestModel.asInstanceOf[CrossValidatorModel].params.foreach(println)
+    val bestPipelineModel = pipelineFittedModel.bestModel.asInstanceOf[PipelineModel]
+    val stages = bestPipelineModel.stages
 
-    println("Best model CrossValidatorModel: extractParamMap")
-    val paramMap=pipelineFittedModel
-      .bestModel.asInstanceOf[CrossValidatorModel].extractParamMap().toSeq.foreach(println)
+    println("Best model: parameters  ")
+    stages(2).extractParamMap().toSeq.toList.foreach(println)
 
     val rm = new RegressionMetrics(
       predictions.select("prediction", "indexed_gt_grand").rdd.map(x =>
@@ -251,11 +253,9 @@ object ActivityRecognition extends InitSparkCluster {
     println("R Squared: " + rm.r2)
     println("Explained Variance: " + rm.explainedVariance + "\n")
 
-
   }
 
   private  def createClassifier()={
-
     val classifier= new RandomForestClassifier()
       .setImpurity(impurity)
       .setMaxDepth(depth)
@@ -264,6 +264,15 @@ object ActivityRecognition extends InitSparkCluster {
       .setSeed(seed)
       .setLabelCol("indexed_gt_grand")
       .setFeaturesCol("indexed_features").setMaxBins(bin)
+    classifier
+  }
+
+  private  def createClassifierForHyperParameters()={
+    val classifier= new RandomForestClassifier()
+      .setFeatureSubsetStrategy("auto")
+      .setSeed(seed)
+      .setLabelCol("indexed_gt_grand")
+      .setFeaturesCol("indexed_features")
     classifier
   }
 
@@ -288,7 +297,7 @@ object ActivityRecognition extends InitSparkCluster {
     (trainingData,testData)
   }
 
-  private def createTrainingPipeline(data: DataFrame):Pipeline ={
+  private def createTrainingPipeline(data: DataFrame,isHyper:Boolean):Pipeline ={
 
     val featureCols = data.select("x_a", "y_a", "z_a", "x_g", "y_g", "z_g").columns
 
@@ -302,7 +311,7 @@ object ActivityRecognition extends InitSparkCluster {
 
     logger.info("Creating classifier :")
 
-    val classifier = createClassifier()
+    val classifier =  if(isHyper) createClassifierForHyperParameters else createClassifier
 
     logger.info("Creating labelConverter :")
 
@@ -317,6 +326,8 @@ object ActivityRecognition extends InitSparkCluster {
     val pipeline = new Pipeline().setStages(Array(labelIndexer, assembler, classifier, labelConverter))
     pipeline
   }
+
+
 
 
 

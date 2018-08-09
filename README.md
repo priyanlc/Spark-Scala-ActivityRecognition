@@ -39,7 +39,7 @@ spark-submit \
     --deploy-mode client \
     --executor-memory 28G \
     --driver-memory 6G \
-    --total-executor-cores 32 \
+    --total-executor-cores 64 \
      /home/hduser/jars/spark-activity-recognition-1.0-SNAPSHOT-shadow.jar --to-parquet false --hyper-param true
 
 
